@@ -1,2 +1,13 @@
+# Ignore Python cache
+__pycache__/
+*.pyc
+
+# Ignore virtual environment
+venv/
+
+# Ignore environment files
+.env
+
+# Ignore local data & generated JSON
 data/
 *.json
