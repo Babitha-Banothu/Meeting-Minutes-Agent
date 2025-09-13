@@ -6,6 +6,7 @@ import crud
 from models import Meeting
 from dotenv import load_dotenv
 import json
+import re
 
 # Load environment variables from .env
 load_dotenv()
@@ -16,22 +17,26 @@ app = FastAPI(title="Meeting Minutes Agent")
 # Allow frontend to call backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # in prod, restrict to frontend domain
+    allow_origins=["*"],  # ⚠️ In production, replace with your frontend domain
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # OpenAI client
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise RuntimeError("❌ OPENAI_API_KEY not set. Please configure it in Render/Deta environment.")
+client = OpenAI(api_key=api_key)
 
-@app.get("/")   # ✅ optional root route
+
+@app.get("/")   # ✅ root route
 def home():
     return {"message": "Meeting Minutes Agent is running 🚀"}
+
+
 @app.post("/summarize")
 async def summarize_meeting(file: UploadFile = File(...)):
-    import json, re
-
     try:
         text = (await file.read()).decode("utf-8")
     except Exception as e:
@@ -55,7 +60,7 @@ async def summarize_meeting(file: UploadFile = File(...)):
     {text}
     """
 
-    # Try OpenAI call first
+    # 🔹 Try OpenAI first
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -63,14 +68,20 @@ async def summarize_meeting(file: UploadFile = File(...)):
             temperature=0.2
         )
         content = response.choices[0].message.content.strip()
+
+        # Try parsing JSON
         parsed = json.loads(content)
+
+        # Validate against Pydantic model
         meeting = Meeting(**parsed)
+
+        # Save to DB
         crud.save_meeting(meeting)
+
         return meeting.model_dump()
 
     except Exception as e:
-        # 🔴 OpenAI failed → fallback parser
-        print("⚠️ OpenAI failed:", str(e))
+        print("⚠️ OpenAI failed, using fallback:", str(e))
 
         # ---- Simple regex-based fallback ----
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
@@ -83,19 +94,21 @@ async def summarize_meeting(file: UploadFile = File(...)):
                 m = re.match(r"\d+\.\s*(.+?)\s*-\s*(.+?)\s*-\s*Due:\s*(.+)", line)
                 if m:
                     owner, task, due = m.groups()
-                    action_items.append({"task": task.strip(), "owner": owner.strip(), "due": due.strip()})
+                    action_items.append({
+                        "task": task.strip(),
+                        "owner": owner.strip(),
+                        "due": due.strip()
+                    })
 
         # Build fallback summary
-        summary_lines = []
-        for ln in lines:
-            if any(word in ln.lower() for word in ["update", "ready", "complete", "issue", "decide", "decision"]):
-                summary_lines.append(ln)
+        summary_lines = [
+            ln for ln in lines
+            if any(word in ln.lower() for word in ["update", "ready", "complete", "issue", "decide", "decision"])
+        ]
         summary = " ".join(summary_lines[:3]) or "Meeting transcript processed, but no summary extracted."
 
-        fallback = {
+        return {
             "summary": summary,
             "decisions": decisions,
             "action_items": action_items
         }
-
-        return fallback
